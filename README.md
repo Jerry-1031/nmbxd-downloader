@@ -4,6 +4,8 @@ A www.nmbxd1.com contents scrapper & downloader.
 
 X岛揭示板小说下载器。也不限于小说。
 
+免去手工复制粘+正则替换的麻烦。
+
 ## Usage
 
 - `pip install -r requirements.txt`
