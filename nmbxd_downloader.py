@@ -1,22 +1,54 @@
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Comment
 import re
-# import time
 
 # 串号
 THREAD_ID = "50000001"
 
+# userhash
 USER_HASH = "YOUR_USER_HASH_HERE"
 
 # 段间空行数
-EMPTY_LINES = 1
+EMPTY_LINES = 2
+
+# normal：浏览全部回复页，再按作者饼筛选；po：使用网站的“只看PO”
+# 作者换过饼时，请使用 normal，网站的只看PO不会包含其他饼的回复
+MODE = "po"
+BASE_URL_TEMPLATES = {
+    "normal": "https://www.nmbxd1.com/t/{}?page={}",
+    "po": "https://www.nmbxd1.com/Forum/po/id/{}/page/{}.html",
+}
+
+# normal模式下，作者额外使用的饼；可填带 ID: 前缀或不带前缀的值
+# 换串时请清空或替换，首帖作者的饼会自动加入。
+EXTRA_PO_UIDS = {}
+
+
+def normalize_uid(uid):
+    """统一网页中的 ID: 前缀与手动配置。"""
+    return re.sub(r"^ID\s*[:：]\s*", "", uid.strip()).strip()
+
+
+def is_author_reply(uid, author_uids):
+    normalized = normalize_uid(uid)
+    return bool(normalized) and normalized in author_uids
 
 
 def get_text_content(element):
     """提取文字内容并处理HTML换行"""
     if not element:
         return ""
-    return element.get_text(separator="\n", strip=True)
+    content = BeautifulSoup(str(element), "html.parser")
+    for unwanted in content.select("script, style"):
+        unwanted.decompose()
+    for node in list(content.find_all(string=True)):
+        if isinstance(node, Comment):
+            node.extract()
+        elif isinstance(node, NavigableString):
+            node.replace_with(re.sub(r"[ \t\r\n\f]+", " ", str(node)))
+    for br in content.find_all("br"):
+        br.replace_with("\n")
+    return "\n".join(line.strip() for line in content.get_text().split("\n")).strip()
 
 
 def get_soup(url):
@@ -46,38 +78,27 @@ def extract_image_link(container):
 
 
 def get_total_pages(soup):
-    """解析总页数"""
-    pagination = soup.find("ul", class_="uk-pagination")
-    if not pagination:
-        return 1
-
-    last_page_link = pagination.find("a", string="末页")
-    if last_page_link:
-        href = last_page_link.get("href")
-        match = re.search(r"/page/(\d+)\.html", href)
-        if match:
-            return int(match.group(1))
-
-    page_links = pagination.find_all("a")
+    """兼容正常模式的 ?page=N 和只看PO模式的 /page/N.html"""
     max_page = 1
-    for link in page_links:
-        text = link.get_text(strip=True)
-        if text.isdigit():
-            p = int(text)
-            if p > max_page:
-                max_page = p
-
-    active_span = pagination.find("li", class_="uk-active")
-    if active_span:
-        text = active_span.get_text(strip=True)
-        if text.isdigit() and int(text) > max_page:
-            max_page = int(text)
-
+    for pagination in soup.select("ul.uk-pagination"):
+        for element in pagination.select("[href], li.uk-active"):
+            href = element.get("href", "")
+            for pattern in (
+                r"[?&]page=(\d+)(?:[&#]|$)",
+                r"/page/(\d+)\.html(?:[?#]|$)",
+            ):
+                match = re.search(pattern, href)
+                if match:
+                    max_page = max(max_page, int(match.group(1)))
+            text = element.get_text(strip=True)
+            if text.isdigit():
+                max_page = max(max_page, int(text))
     return max_page
 
 
 if __name__ == "__main__":
-    base_url_template = "https://www.nmbxd1.com/Forum/po/id/{}/page/{}.html"
+    base_url_template = BASE_URL_TEMPLATES[MODE]
+    print(f"当前模式: {MODE}")
 
     all_content_blocks = []
 
@@ -106,6 +127,9 @@ if __name__ == "__main__":
 
     uid_span = info_div.find("span", class_="h-threads-info-uid")
     po_uid_text = uid_span.get_text(strip=True) if uid_span else ""
+    author_uids = {normalize_uid(uid) for uid in EXTRA_PO_UIDS}
+    author_uids.add(normalize_uid(po_uid_text))
+    author_uids.discard("")
 
     time_span = info_div.find("span", class_="h-threads-info-createdat")
     time_text = time_span.get_text(strip=True) if time_span else ""
@@ -155,13 +179,7 @@ if __name__ == "__main__":
                 r_uid_span = r_info.find("span", class_="h-threads-info-uid")
                 r_uid_text = r_uid_span.get_text(strip=True) if r_uid_span else ""
 
-                # is_po_tag = False
-                # po_tag_span = r_info.find("span", class_="uk-text-primary")
-                # if po_tag_span and "(PO主)" in po_tag_span.get_text():
-                #     is_po_tag = True
-
-                # if is_po_tag or (r_uid_text == po_uid_text):
-                if r_uid_text == po_uid_text:
+                if is_author_reply(r_uid_text, author_uids):
                     r_img_link = extract_image_link(reply_main)
 
                     r_content_div = reply_main.find("div", class_="h-threads-content")
@@ -180,9 +198,6 @@ if __name__ == "__main__":
     for page_num in range(2, total_pages + 1):
         target_url = base_url_template.format(THREAD_ID, page_num)
         print(f"正在抓取第 {page_num}/{total_pages} 页: {target_url}")
-
-        # time.sleep(0.5)
-
         p_soup = get_soup(target_url)
         if p_soup:
             page_blocks = extract_from_page(p_soup, is_first_page=False)
